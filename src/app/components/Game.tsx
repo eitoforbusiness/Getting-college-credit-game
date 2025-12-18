@@ -3,15 +3,27 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import BluetoothController, { ControllerData } from './BluetoothController';
 
+const STAGE_CONFIG = [
+  { id: 1, label: '1ステージ', targetScore: 30, spawnIntervalMs: 2000, fallSpeed: 1.0 },
+  { id: 2, label: '2ステージ', targetScore: 70, spawnIntervalMs: 1700, fallSpeed: 1.3 },
+  { id: 3, label: '3ステージ', targetScore: 120, spawnIntervalMs: 1400, fallSpeed: 1.6 },
+  { id: 4, label: '4ステージ', targetScore: 180, spawnIntervalMs: 1200, fallSpeed: 1.9 },
+] as const;
+
 export default function Game() {
   const [controllerData, setControllerData] = useState<ControllerData | null>(null);
-  const [playerPosition, setPlayerPosition] = useState({ x: 50, y: 50 });
+  const [playerPosition, setPlayerPosition] = useState({ x: 50, y: 80 });
   const [score, setScore] = useState(0);
   const [gameStarted, setGameStarted] = useState(false);
+  const [stage, setStage] = useState(1);
   const [targets, setTargets] = useState<Array<{ id: number; x: number; y: number }>>([]);
   const targetIdRef = useRef(0);
-  const buttonAPressedRef = useRef(false);
-  const playerPositionRef = useRef({ x: 50, y: 50 });
+  const scoredTargetIdsRef = useRef<Set<number>>(new Set());
+  const playerPositionRef = useRef({ x: 50, y: 80 });
+
+  const currentStage = STAGE_CONFIG[stage - 1];
+  const canGoNextStage =
+    stage < STAGE_CONFIG.length && score >= currentStage.targetScore;
 
   const clampToField = (value: number) => Math.max(5, Math.min(95, value));
 
@@ -20,14 +32,11 @@ export default function Game() {
     return next;
   };
 
-  // 加速度からロール・ピッチを算出し、デッドゾーン＋感度で移動量に変換
+  // 加速度からロール（左右の傾き）を算出し、デッドゾーン＋感度で移動量に変換
   const tiltToDelta = (data: ControllerData) => {
-    // ロール: 左右の傾き / ピッチ: 前後の傾き
+    // ロール: 左右の傾きのみを使用
     const rollRad = Math.atan2(data.accelY, data.accelZ);
-    const pitchRad = Math.atan2(-data.accelX, Math.sqrt(data.accelY * data.accelY + data.accelZ * data.accelZ));
-
     const rollDeg = (rollRad * 180) / Math.PI;
-    const pitchDeg = (pitchRad * 180) / Math.PI;
 
     const deadZoneDeg = 3; // 小さな揺れを無視
     const maxTiltDeg = 35; // これ以上は最大移動量でクリップ
@@ -41,81 +50,90 @@ export default function Game() {
 
     return {
       deltaX: applyCurve(rollDeg),
-      deltaY: applyCurve(pitchDeg),
+      deltaY: 0, // 上下の移動は無効化
     };
   };
 
   const handleDataReceived = useCallback((data: ControllerData) => {
     setControllerData(data);
 
-    const { deltaX, deltaY } = tiltToDelta(data);
-    // テストモード／ゲーム中どちらでも傾きで移動
-    setPlayerPosition(prev => updatePlayerPosition({
-      x: clampToField(prev.x + deltaX),
-      y: clampToField(prev.y + deltaY),
-    }));
-
-    // ボタンAでスコア加算（押下の瞬間のみ）
-    if (data.buttonA && !buttonAPressedRef.current) {
-      buttonAPressedRef.current = true;
-      // ターゲットとの衝突判定
-      setTargets(prev => {
-        const newTargets = prev.filter(target => {
-          const distance = Math.sqrt(
-            Math.pow(target.x - playerPositionRef.current.x, 2) + 
-            Math.pow(target.y - playerPositionRef.current.y, 2)
-          );
-          if (distance < 8) {
-            setScore(s => s + 10);
-            return false; // ターゲットを削除
-          }
-          return true;
-        });
-        return newTargets;
-      });
-    } else if (!data.buttonA) {
-      buttonAPressedRef.current = false;
-    }
-  }, [gameStarted, playerPosition]);
+    const { deltaX } = tiltToDelta(data);
+    // テストモード／ゲーム中どちらでも傾きで移動（左右のみ）
+    setPlayerPosition(prev =>
+      updatePlayerPosition({
+        x: clampToField(prev.x + deltaX),
+        y: prev.y, // Y座標は固定（上下移動なし）
+      }),
+    );
+  }, []);
 
   // ターゲット生成
   useEffect(() => {
     if (!gameStarted) return;
+
+    const intervalMs = currentStage.spawnIntervalMs;
 
     const interval = setInterval(() => {
       setTargets(prev => {
         const newTarget = {
           id: targetIdRef.current++,
           x: Math.random() * 80 + 10,
-          y: Math.random() * 80 + 10,
+          y: 5, // 画面上部から出現
         };
         return [...prev, newTarget];
       });
-    }, 2000);
+    }, intervalMs);
 
     return () => clearInterval(interval);
-  }, [gameStarted]);
+  }, [gameStarted, currentStage.spawnIntervalMs]);
 
-  // ターゲットの自動削除（10秒後）
+  // ターゲットを下方向に落としつつ、プレイヤーとの衝突判定を行う
   useEffect(() => {
     if (!gameStarted) return;
 
+    const fallSpeed = currentStage.fallSpeed; // 1ティックごとに落ちる量（%）
+    const intervalMs = 80;
+
     const interval = setInterval(() => {
-      setTargets(prev => {
-        if (prev.length > 0) {
-          return prev.slice(1);
-        }
-        return prev;
+      setTargets(prevTargets => {
+        const remaining: Array<{ id: number; x: number; y: number }> = [];
+
+        prevTargets.forEach(target => {
+          const moved = { ...target, y: target.y + fallSpeed };
+
+          // プレイヤーとの衝突判定（少しでも重なったらヒット）
+          const dx = moved.x - playerPositionRef.current.x;
+          const dy = moved.y - playerPositionRef.current.y;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          const hitRadius = 7; // 当たり判定の広さ
+
+          if (distance < hitRadius) {
+            // まだスコア加算していないターゲットだけ加算
+            if (!scoredTargetIdsRef.current.has(moved.id)) {
+              scoredTargetIdsRef.current.add(moved.id);
+              setScore(s => s + 2); // ヒットしたら2点追加
+            }
+            return; // このターゲットは削除
+          }
+
+          // 画面下（100%）まで到達したターゲットは削除
+          if (moved.y <= 100) {
+            remaining.push(moved);
+          }
+        });
+
+        return remaining;
       });
-    }, 10000);
+    }, intervalMs);
 
     return () => clearInterval(interval);
-  }, [gameStarted]);
+  }, [gameStarted, currentStage.fallSpeed]);
 
   const startGame = () => {
     setGameStarted(true);
     setScore(0);
-    setPlayerPosition(updatePlayerPosition({ x: 50, y: 50 }));
+    setStage(1);
+    setPlayerPosition(updatePlayerPosition({ x: 50, y: 80 }));
     setTargets([]);
     targetIdRef.current = 0;
   };
@@ -123,19 +141,34 @@ export default function Game() {
   const stopGame = () => {
     setGameStarted(false);
     setTargets([]);
-    setPlayerPosition(updatePlayerPosition({ x: 50, y: 50 }));
+    setPlayerPosition(updatePlayerPosition({ x: 50, y: 80 }));
   };
 
   return (
-    <div className="flex flex-col items-center gap-6 p-8 w-full max-w-4xl">
+    <div className="flex flex-col items-center gap-8 p-4 md:p-8 w-full max-w-3xl md:max-w-5xl lg:max-w-6xl xl:max-w-[1400px] 2xl:max-w-[1600px]">
       <BluetoothController onDataReceived={handleDataReceived} />
       
       <div className="w-full">
-        <div className="mb-4 text-center">
-          <h2 className="text-3xl font-bold mb-2 text-gray-900 dark:text-gray-100">
-            スコア: {score}
-          </h2>
-          <div className="flex gap-4 justify-center mt-4">
+        <div className="mb-4 text-center space-y-3">
+          <div className="flex flex-col items-center gap-1">
+            <h2 className="text-3xl font-bold text-gray-900 dark:text-gray-100">
+              スコア: {score}
+            </h2>
+            <div className="text-sm text-gray-700 dark:text-gray-300 flex flex-col items-center gap-1">
+              <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-100 dark:bg-indigo-900 text-indigo-800 dark:text-indigo-100 text-sm font-semibold">
+                現在のステージ: {currentStage.label}
+              </span>
+              {stage < STAGE_CONFIG.length ? (
+                <span>
+                  次のステージ条件: スコア {currentStage.targetScore} 以上
+                </span>
+              ) : (
+                <span>最終ステージです</span>
+              )}
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-4 justify-center mt-2">
             {!gameStarted ? (
               <button
                 onClick={startGame}
@@ -151,11 +184,31 @@ export default function Game() {
                 ゲーム停止
               </button>
             )}
+
+            {/* 次のステージへ進むボタン */}
+            {stage < STAGE_CONFIG.length && (
+              <button
+                onClick={() => {
+                  if (!canGoNextStage) return;
+                  setStage(prev => prev + 1);
+                  setTargets([]);
+                  setPlayerPosition(updatePlayerPosition({ x: 50, y: 80 }));
+                }}
+                disabled={!canGoNextStage}
+                className={`px-6 py-3 rounded-lg font-medium text-lg border transition-colors ${
+                  canGoNextStage
+                    ? 'bg-indigo-500 text-white border-indigo-600 hover:bg-indigo-600'
+                    : 'bg-gray-200 text-gray-500 border-gray-300 cursor-not-allowed'
+                }`}
+              >
+                次のステージへ
+              </button>
+            )}
           </div>
         </div>
         
         {/* ゲーム画面 */}
-        <div className="relative w-full h-96 bg-gradient-to-br from-blue-100 to-purple-100 dark:from-gray-800 dark:to-gray-900 rounded-lg overflow-hidden border-2 border-gray-300 dark:border-gray-700 shadow-lg">
+        <div className="relative w-full h-[34rem] md:h-[42rem] lg:h-[46rem] bg-gradient-to-br from-blue-100 to-purple-100 dark:from-gray-800 dark:to-gray-900 rounded-2xl overflow-hidden border-2 border-gray-300 dark:border-gray-700 shadow-2xl">
           {/* プレイヤー */}
           <div
             className="absolute w-8 h-8 bg-blue-500 rounded-full transition-all duration-100 shadow-lg border-2 border-white"
@@ -166,17 +219,19 @@ export default function Game() {
             }}
           />
           
-          {/* ターゲット */}
+          {/* ターゲット（単位カード） */}
           {targets.map(target => (
             <div
               key={target.id}
-              className="absolute w-6 h-6 bg-yellow-400 rounded-full animate-pulse border-2 border-yellow-600 shadow-md"
+              className="absolute w-12 h-8 bg-white/90 dark:bg-yellow-100/90 rounded-md shadow-lg border border-yellow-400 flex items-center justify-center text-xs font-bold text-yellow-700 dark:text-yellow-800 rotate-3"
               style={{
                 left: `${target.x}%`,
                 top: `${target.y}%`,
                 transform: 'translate(-50%, -50%)',
               }}
-            />
+            >
+              単位
+            </div>
           ))}
 
           {/* ゲーム説明 / 操作確認モード */}
@@ -206,9 +261,9 @@ export default function Game() {
                     <ul className="text-left space-y-2 text-sm">
                       <li>• M5StickCplus2を接続してください</li>
                       <li>• デバイスを傾けてプレイヤーを移動</li>
-                      <li>• 黄色のターゲットに近づいてボタンAで取得</li>
+                      <li>• 上から降ってくる黄色のターゲットに触れると自動的に取得</li>
                       <li>• 1つのターゲットで10ポイント獲得</li>
-                      <li>• ターゲットは10秒で消えます</li>
+                      <li>• 画面下まで落ちたターゲットは消えます</li>
                     </ul>
                   </>
                 )}
@@ -216,65 +271,6 @@ export default function Game() {
             </div>
           )}
         </div>
-
-        {/* コントローラーデータ表示（リアルタイム確認用） */}
-        {controllerData && (
-          <div className="mt-4 p-4 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700">
-            <h3 className="font-bold mb-3 text-gray-900 dark:text-gray-100">
-              M5StickCplus2 リアルタイムデータ
-            </h3>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-              <div className={`p-2 rounded ${controllerData.buttonA ? 'bg-green-200 dark:bg-green-900' : 'bg-gray-200 dark:bg-gray-700'}`}>
-                <div className="font-semibold mb-1">ボタンA</div>
-                <div className={controllerData.buttonA ? 'text-green-700 dark:text-green-300 font-bold' : 'text-gray-600 dark:text-gray-400'}>
-                  {controllerData.buttonA ? '● 押されています' : '○ 離されています'}
-                </div>
-              </div>
-              <div className={`p-2 rounded ${controllerData.buttonB ? 'bg-green-200 dark:bg-green-900' : 'bg-gray-200 dark:bg-gray-700'}`}>
-                <div className="font-semibold mb-1">ボタンB</div>
-                <div className={controllerData.buttonB ? 'text-green-700 dark:text-green-300 font-bold' : 'text-gray-600 dark:text-gray-400'}>
-                  {controllerData.buttonB ? '● 押されています' : '○ 離されています'}
-                </div>
-              </div>
-              <div className="p-2 rounded bg-blue-50 dark:bg-blue-900">
-                <div className="font-semibold mb-1">加速度 X</div>
-                <div className="text-blue-700 dark:text-blue-300">
-                  {controllerData.accelX.toFixed(3)} G
-                </div>
-              </div>
-              <div className="p-2 rounded bg-blue-50 dark:bg-blue-900">
-                <div className="font-semibold mb-1">加速度 Y</div>
-                <div className="text-blue-700 dark:text-blue-300">
-                  {controllerData.accelY.toFixed(3)} G
-                </div>
-              </div>
-              <div className="p-2 rounded bg-blue-50 dark:bg-blue-900">
-                <div className="font-semibold mb-1">加速度 Z</div>
-                <div className="text-blue-700 dark:text-blue-300">
-                  {controllerData.accelZ.toFixed(3)} G
-                </div>
-              </div>
-              <div className="p-2 rounded bg-purple-50 dark:bg-purple-900">
-                <div className="font-semibold mb-1">ジャイロ X</div>
-                <div className="text-purple-700 dark:text-purple-300">
-                  {controllerData.gyroX.toFixed(1)} °/s
-                </div>
-              </div>
-              <div className="p-2 rounded bg-purple-50 dark:bg-purple-900">
-                <div className="font-semibold mb-1">ジャイロ Y</div>
-                <div className="text-purple-700 dark:text-purple-300">
-                  {controllerData.gyroY.toFixed(1)} °/s
-                </div>
-              </div>
-              <div className="p-2 rounded bg-purple-50 dark:bg-purple-900">
-                <div className="font-semibold mb-1">ジャイロ Z</div>
-                <div className="text-purple-700 dark:text-purple-300">
-                  {controllerData.gyroZ.toFixed(1)} °/s
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );
