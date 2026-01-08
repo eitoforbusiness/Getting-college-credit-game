@@ -3,6 +3,23 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import BluetoothController, { ControllerData } from './BluetoothController';
 
+const SPECIAL_COURSES = [
+  { id: 'statistics', label: '統計入門' },
+  { id: 'info_exercise', label: '社会情報体験演習' },
+  { id: 'social_science', label: '社会科学概論' },
+] as const;
+
+type SpecialCourseId = (typeof SPECIAL_COURSES)[number]['id'];
+
+type Target = {
+  id: number;
+  x: number;
+  y: number;
+  kind: 'credit' | 'course';
+  label: string;
+  courseId?: SpecialCourseId;
+};
+
 const STAGE_CONFIG = [
   { id: 1, label: '1ステージ', targetScore: 30, spawnIntervalMs: 2000, fallSpeed: 1.0 },
   { id: 2, label: '2ステージ', targetScore: 70, spawnIntervalMs: 1700, fallSpeed: 1.3 },
@@ -10,16 +27,24 @@ const STAGE_CONFIG = [
   { id: 4, label: '4ステージ', targetScore: 180, spawnIntervalMs: 1200, fallSpeed: 1.9 },
 ] as const;
 
+const MAX_SCORE = 124;
+const CREDITS_PER_STAGE = 48; // 1年間（1ステージ）で落ちる単位の上限
+
 export default function Game() {
   const [controllerData, setControllerData] = useState<ControllerData | null>(null);
   const [playerPosition, setPlayerPosition] = useState({ x: 50, y: 80 });
   const [score, setScore] = useState(0);
   const [gameStarted, setGameStarted] = useState(false);
   const [stage, setStage] = useState(1);
-  const [targets, setTargets] = useState<Array<{ id: number; x: number; y: number }>>([]);
+  const [targets, setTargets] = useState<Target[]>([]);
+  const [spawnedTargetsThisStage, setSpawnedTargetsThisStage] = useState(0);
   const targetIdRef = useRef(0);
   const scoredTargetIdsRef = useRef<Set<number>>(new Set());
   const playerPositionRef = useRef({ x: 50, y: 80 });
+  // これまでに取得済みの特別科目（ゲーム中は二度と出現しない）
+  const obtainedCoursesRef = useRef<Set<SpecialCourseId>>(new Set());
+  // 各ステージで既に出現させた特別科目（同じ学年では1回だけ出現）
+  const spawnedCoursesThisStageRef = useRef<Set<SpecialCourseId>>(new Set());
 
   const currentStage = STAGE_CONFIG[stage - 1];
   const canGoNextStage =
@@ -74,13 +99,53 @@ export default function Game() {
     const intervalMs = currentStage.spawnIntervalMs;
 
     const interval = setInterval(() => {
-      setTargets(prev => {
-        const newTarget = {
-          id: targetIdRef.current++,
-          x: Math.random() * 80 + 10,
-          y: 5, // 画面上部から出現
-        };
-        return [...prev, newTarget];
+      setSpawnedTargetsThisStage(current => {
+        // 1年間で48単位までしか落ちないように制限
+        if (current >= CREDITS_PER_STAGE) {
+          return current; // 48個に達していたら新しいターゲットを生成しない
+        }
+
+        // まだ取得しておらず、かつ今のステージでまだ出現させていない特別科目の候補
+        const availableSpecialCourses = SPECIAL_COURSES.filter(
+          c =>
+            !obtainedCoursesRef.current.has(c.id) &&
+            !spawnedCoursesThisStageRef.current.has(c.id),
+        );
+
+        let newTarget: Target;
+
+        // 特別科目が候補にあり、一定確率で特別科目を落とす
+        if (availableSpecialCourses.length > 0 && Math.random() < 0.3) {
+          const course =
+            availableSpecialCourses[
+              Math.floor(Math.random() * availableSpecialCourses.length)
+            ];
+          spawnedCoursesThisStageRef.current.add(course.id);
+
+          newTarget = {
+            id: targetIdRef.current++,
+            x: Math.random() * 80 + 10,
+            y: 5, // 画面上部から出現
+            kind: 'course',
+            label: course.label,
+            courseId: course.id,
+          };
+        } else {
+          // 通常の単位（無制限に出現）
+          newTarget = {
+            id: targetIdRef.current++,
+            x: Math.random() * 80 + 10,
+            y: 5, // 画面上部から出現
+            kind: 'credit',
+            label: '単位',
+          };
+        }
+
+        // ターゲットを追加
+        setTargets(prev => [...prev, newTarget]);
+
+        // ターゲットを生成したのでカウントを増やす
+        return current + 1;
       });
     }, intervalMs);
 
@@ -96,7 +161,7 @@ export default function Game() {
 
     const interval = setInterval(() => {
       setTargets(prevTargets => {
-        const remaining: Array<{ id: number; x: number; y: number }> = [];
+        const remaining: Target[] = [];
 
         prevTargets.forEach(target => {
           const moved = { ...target, y: target.y + fallSpeed };
@@ -112,6 +177,10 @@ export default function Game() {
             if (!scoredTargetIdsRef.current.has(moved.id)) {
               scoredTargetIdsRef.current.add(moved.id);
               setScore(s => s + 2); // ヒットしたら2点追加
+              // 特別科目を取得したら、それ以降はどの学年にも落ちてこないようにする
+              if (moved.kind === 'course' && moved.courseId) {
+                obtainedCoursesRef.current.add(moved.courseId);
+              }
             }
             return; // このターゲットは削除
           }
@@ -135,7 +204,11 @@ export default function Game() {
     setStage(1);
     setPlayerPosition(updatePlayerPosition({ x: 50, y: 80 }));
     setTargets([]);
+    setSpawnedTargetsThisStage(0);
     targetIdRef.current = 0;
+    scoredTargetIdsRef.current = new Set();
+    obtainedCoursesRef.current = new Set();
+    spawnedCoursesThisStageRef.current = new Set();
   };
 
   const stopGame = () => {
@@ -154,9 +227,30 @@ export default function Game() {
             <h2 className="text-3xl font-bold text-gray-900 dark:text-gray-100">
               スコア: {score}
             </h2>
+            {/* スコアゲージ */}
+            <div className="w-full max-w-md mt-2">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-sm text-gray-600 dark:text-gray-400">0</span>
+                <span className="text-sm font-semibold text-gray-700 dark:text-gray-300">
+                  {score} / {MAX_SCORE}
+                </span>
+                <span className="text-sm text-gray-600 dark:text-gray-400">{MAX_SCORE}</span>
+              </div>
+              <div className="w-full h-6 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden shadow-inner">
+                <div
+                  className="h-full bg-gradient-to-r from-blue-500 via-indigo-500 to-purple-500 transition-all duration-300 ease-out rounded-full"
+                  style={{
+                    width: `${Math.min((score / MAX_SCORE) * 100, 100)}%`,
+                  }}
+                />
+              </div>
+            </div>
             <div className="text-sm text-gray-700 dark:text-gray-300 flex flex-col items-center gap-1">
               <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-100 dark:bg-indigo-900 text-indigo-800 dark:text-indigo-100 text-sm font-semibold">
                 現在のステージ: {currentStage.label}
+              </span>
+              <span className="text-xs text-gray-600 dark:text-gray-400">
+                この学年で落ちた単位: {spawnedTargetsThisStage} / {CREDITS_PER_STAGE}
               </span>
               {stage < STAGE_CONFIG.length ? (
                 <span>
@@ -193,6 +287,9 @@ export default function Game() {
                   setStage(prev => prev + 1);
                   setTargets([]);
                   setPlayerPosition(updatePlayerPosition({ x: 50, y: 80 }));
+                  // 新しい学年に進んだら、その学年での出現履歴をリセット
+                  spawnedCoursesThisStageRef.current = new Set();
+                  setSpawnedTargetsThisStage(0);
                 }}
                 disabled={!canGoNextStage}
                 className={`px-6 py-3 rounded-lg font-medium text-lg border transition-colors ${
@@ -230,7 +327,7 @@ export default function Game() {
                 transform: 'translate(-50%, -50%)',
               }}
             >
-              単位
+              {target.label}
             </div>
           ))}
 
