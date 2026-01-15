@@ -1,15 +1,69 @@
 'use client';
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import BluetoothController, { ControllerData } from './BluetoothController';
 
-const SPECIAL_COURSES = [
+const SPECIAL_COURSES1 = [
   { id: 'statistics', label: '統計入門' },
   { id: 'info_exercise', label: '社会情報体験演習' },
   { id: 'social_science', label: '社会科学概論' },
+  { id: 'human_science', label: '人間科学概論' },
+  { id: 'info_science', label: '情報科学概論' },
+  { id: 'communication_basic', label: 'コミュニケーション基礎' },
+  { id: 'math', label: '数学' },
+  { id: 'information_skill', label: '情報スキル' },
+  { id: 'second_language', label: '第二外国語' },
+  { id: 'physical_education', label: '体育' },
+  { id: 'integrated_english', label: 'Integrated English' },
+  { id: 'christian_introduction', label: 'キリスト教概論' },
 ] as const;
 
-type SpecialCourseId = (typeof SPECIAL_COURSES)[number]['id'];
+const SPECIAL_COURSES2 = [
+  { id: 'project_exercise', label: 'プロジェクト演習入門' },
+  { id: 'info_special_lecture', label: '社会情報特別講義' },
+  { id: 'test_talking', label: 'Test-Talking-skill' },
+
+] as const;
+
+const SPECIAL_COURSES3 = [
+  { id: 'seminar1', label: 'ゼミナールⅠ' },
+  { id: 'seminar2', label: 'ゼミナールⅡ' },
+] as const;
+
+const SPECIAL_COURSES4 = [
+  { id: 'experimentation1', label: '実験演習Ⅰ' },
+  { id: 'experimentation2', label: '実験演習Ⅱ' },
+] as const;
+
+const ALL_SPECIAL_COURSES = [
+  ...SPECIAL_COURSES1,
+  ...SPECIAL_COURSES2,
+  ...SPECIAL_COURSES3,
+  ...SPECIAL_COURSES4,
+] as const;
+
+const REQUIRED_BY_END_OF_STAGE3 = [
+  ...SPECIAL_COURSES1,
+  ...SPECIAL_COURSES2,
+  ...SPECIAL_COURSES3,
+] as const;
+
+const REQUIRED_BY_END_OF_STAGE4 = [...SPECIAL_COURSES4] as const;
+
+const getSpecialCoursesForStage = (stageId: number) => {
+  if (stageId === 1) return SPECIAL_COURSES1;
+  if (stageId === 2) return [...SPECIAL_COURSES1, ...SPECIAL_COURSES2];
+  if (stageId === 3)
+    return [...SPECIAL_COURSES1, ...SPECIAL_COURSES2, ...SPECIAL_COURSES3];
+  return SPECIAL_COURSES4;
+};
+
+const AoyamaStandards = [
+  { id: 'aoyama_standard_course1', label: '青スタ' },
+  { id: 'aoyama_standard_course2', label: '青スタ' },
+] as const;
+
+type SpecialCourseId = (typeof ALL_SPECIAL_COURSES)[number]['id'];
 
 type Target = {
   id: number;
@@ -21,43 +75,65 @@ type Target = {
 };
 
 const STAGE_CONFIG = [
-  { id: 1, label: '1ステージ', targetScore: 30, spawnIntervalMs: 500, fallSpeed: 2 },
-  { id: 2, label: '2ステージ', targetScore: 70, spawnIntervalMs: 1000, fallSpeed: 2 },
-  { id: 3, label: '3ステージ', targetScore: 120, spawnIntervalMs: 1000, fallSpeed: 2 },
-  { id: 4, label: '4ステージ', targetScore: 180, spawnIntervalMs: 1000, fallSpeed: 2 },
+  { id: 1, label: '1ステージ', spawnIntervalMs: 800, fallSpeed: 2 },
+  { id: 2, label: '2ステージ', spawnIntervalMs: 800, fallSpeed: 2 },
+  { id: 3, label: '3ステージ', spawnIntervalMs: 800, fallSpeed: 2 },
+  { id: 4, label: '4ステージ', spawnIntervalMs: 800, fallSpeed: 2 },
 ] as const;
 
 const MAX_SCORE = 124;
-const CREDITS_PER_STAGE = 18; // 1年間（1ステージ）で落ちる単位の上限（特別科目と通常単位の合計）
+const MAX_ACTIVE_TARGETS = 2; // 画面上に同時に存在できる最大数
+const CREDITS_PER_TARGET = 4; // 1つの単位・授業で加算される単位数
+const MAX_COLLECTED_PER_STAGE = 48; // 1年間（1ステージ）で取得できる単位の上限（単位数）
 
 export default function Game() {
   const [controllerData, setControllerData] = useState<ControllerData | null>(null);
   const [playerPosition, setPlayerPosition] = useState({ x: 50, y: 80 });
   const [score, setScore] = useState(0);
-  const [collectedUnitsThisStage, setCollectedUnitsThisStage] = useState(0); // 各ステージで取得した単位・特別授業の数
-  const [droppedUnitsThisStage, setDroppedUnitsThisStage] = useState(0); // 各ステージで画面下まで落ちた単位・特別授業の数
+  const [collectedUnitsThisStage, setCollectedUnitsThisStage] = useState(0); // 各ステージで取得した単位数
   const [gameStarted, setGameStarted] = useState(false);
   const [gameOver, setGameOver] = useState(false);
+  const [gameOverReason, setGameOverReason] = useState<string | null>(null);
   const [isGraduated, setIsGraduated] = useState(false); // 卒業フラグ
   const [stage, setStage] = useState(1);
   const [targets, setTargets] = useState<Target[]>([]);
   const [spawnedTargetsThisStage, setSpawnedTargetsThisStage] = useState(0);
   const [showStageTransition, setShowStageTransition] = useState(false); // ステージ遷移時の表示フラグ
+  const [obtainedCourseIds, setObtainedCourseIds] = useState<SpecialCourseId[]>([]);
   const targetIdRef = useRef(0);
   const scoredTargetIdsRef = useRef<Set<number>>(new Set());
-  // 「同時に2つ落ちない」制御用（画面上に存在するターゲット数）
+  // 画面上に存在するターゲット数（同時出現数の制御）
   const activeTargetsCountRef = useRef(0);
   const playerPositionRef = useRef({ x: 50, y: 80 });
   // これまでに取得済みの特別科目（ゲーム中は二度と出現しない）
   const obtainedCoursesRef = useRef<Set<SpecialCourseId>>(new Set());
   // 各ステージで既に出現させた特別科目（同じ学年では1回だけ出現）
   const spawnedCoursesThisStageRef = useRef<Set<SpecialCourseId>>(new Set());
-  // 各ステージで取得した単位・特別授業数を参照するためのref
+  // 各ステージで取得した単位数を参照するためのref
   const collectedUnitsThisStageRef = useRef(0);
-  // 各ステージで画面下まで落ちた単位・特別授業数を参照するためのref
-  const droppedUnitsThisStageRef = useRef(0);
+  // 各ステージで出現した単位数を参照するためのref
+  const spawnedTargetsThisStageRef = useRef(0);
+  // 出現済みターゲットを重複カウントしないためのref
+  const countedSpawnTargetIdsRef = useRef<Set<number>>(new Set());
 
   const currentStage = STAGE_CONFIG[stage - 1];
+  const hasMissingRequiredCourses = useCallback(
+    (requiredCourses: readonly { id: SpecialCourseId }[]) =>
+      requiredCourses.some(course => !obtainedCoursesRef.current.has(course.id)),
+    [],
+  );
+  const obtainedCourseIdSet = useMemo(
+    () => new Set(obtainedCourseIds),
+    [obtainedCourseIds],
+  );
+  const obtainedCourses = useMemo(
+    () => ALL_SPECIAL_COURSES.filter(course => obtainedCourseIdSet.has(course.id)),
+    [obtainedCourseIdSet],
+  );
+  const missingCourses = useMemo(
+    () => ALL_SPECIAL_COURSES.filter(course => !obtainedCourseIdSet.has(course.id)),
+    [obtainedCourseIdSet],
+  );
   
   // 学年名のマッピング
   const getGradeName = (stageId: number): string => {
@@ -113,9 +189,10 @@ export default function Game() {
   }, []);
 
   // ゲームオーバー処理（大学4年生になるまでに必要スコアに届かなかった場合など）
-  const triggerGameOver = useCallback(() => {
+  const triggerGameOver = useCallback((reason?: string) => {
     setGameStarted(false);
     setGameOver(true);
+    setGameOverReason(reason ?? null);
     setShowStageTransition(false);
     setTargets([]);
     activeTargetsCountRef.current = 0;
@@ -131,31 +208,49 @@ export default function Game() {
     collectedUnitsThisStageRef.current = collectedUnitsThisStage;
   }, [collectedUnitsThisStage]);
 
-  // 落下数が変わるたびにrefを更新
+  // 出現数が変わるたびにrefを更新
   useEffect(() => {
-    droppedUnitsThisStageRef.current = droppedUnitsThisStage;
-  }, [droppedUnitsThisStage]);
+    spawnedTargetsThisStageRef.current = spawnedTargetsThisStage;
+  }, [spawnedTargetsThisStage]);
 
-  // 「この学年で落ちてきた累計」を、生成回数ではなく
-  // (取得 + 取り逃し + 画面上) から一意に決まる値として更新する
+  // 出現したターゲットを数える（重複カウント防止）
   useEffect(() => {
     if (!gameStarted) return;
-    setSpawnedTargetsThisStage(
-      collectedUnitsThisStage + droppedUnitsThisStage + targets.length,
-    );
-  }, [gameStarted, collectedUnitsThisStage, droppedUnitsThisStage, targets.length]);
+    let newlyCounted = 0;
+    targets.forEach(target => {
+      if (!countedSpawnTargetIdsRef.current.has(target.id)) {
+        countedSpawnTargetIdsRef.current.add(target.id);
+        if (target.kind === 'course' && target.courseId) {
+          spawnedCoursesThisStageRef.current.add(target.courseId);
+        }
+        newlyCounted += 1;
+      }
+    });
+    if (newlyCounted > 0) {
+      const increment = newlyCounted * CREDITS_PER_TARGET;
+      spawnedTargetsThisStageRef.current += increment;
+      setSpawnedTargetsThisStage(c => c + increment);
+    }
+  }, [gameStarted, targets]);
 
-  // 12個（CREDITS_PER_STAGE）の単位・授業が落ちたら自動的に次のステージへ進む
+  // 出現上限に達し、全て落ち切ったら次のステージへ進む
   useEffect(() => {
     if (!gameStarted) return;
-    
-    const totalThisStage = collectedUnitsThisStage + droppedUnitsThisStage + targets.length;
-    
-    // 4年生で全単位が落ちた時の処理
-    if (totalThisStage >= CREDITS_PER_STAGE && stage === 4) {
+
+    const spawnedLimitReached =
+      spawnedTargetsThisStage >= MAX_COLLECTED_PER_STAGE;
+    const allTargetsCleared = targets.length === 0;
+
+    // 4年生で出現上限に達した時の処理
+    if (spawnedLimitReached && allTargetsCleared && stage === 4) {
+      if (hasMissingRequiredCourses(REQUIRED_BY_END_OF_STAGE4)) {
+        triggerGameOver('4年生の必修特別授業を取りきれませんでした。');
+        return;
+      }
+
       if (score < 124) {
         // スコアが124未満ならゲームオーバー
-        triggerGameOver();
+        triggerGameOver('スコアが124に届きませんでした。');
       } else {
         // スコアが124以上なら卒業
         setGameStarted(false);
@@ -166,17 +261,23 @@ export default function Game() {
       return;
     }
     
-    if (totalThisStage >= CREDITS_PER_STAGE && stage < STAGE_CONFIG.length) {
+    if (spawnedLimitReached && allTargetsCleared && stage < STAGE_CONFIG.length) {
       // 大学4年生になる前（=3年生の終了時点）にスコアが90未満ならゲームオーバー
-      if (stage === 3 && score < 90) {
-        triggerGameOver();
-        return;
+      if (stage === 3) {
+        if (hasMissingRequiredCourses(REQUIRED_BY_END_OF_STAGE3)) {
+          triggerGameOver('3年生終了までに必要な必修科目を取りきれませんでした。');
+          return;
+        }
+        if (score < 90) {
+          triggerGameOver('大学4年生になるまでに必要な取得単位(90)に届きませんでした。');
+          return;
+        }
       }
 
       // ステージ遷移の表示を出す
       setShowStageTransition(true);
       
-      // 2秒後に次のステージへ進む
+      // 1秒後に次のステージへ進む
       const timer = setTimeout(() => {
         setStage(prev => prev + 1);
         setTargets([]);
@@ -185,16 +286,25 @@ export default function Game() {
         // 新しい学年に進んだら、その学年での出現履歴をリセット
         spawnedCoursesThisStageRef.current = new Set();
         setSpawnedTargetsThisStage(0);
+        spawnedTargetsThisStageRef.current = 0;
+        countedSpawnTargetIdsRef.current = new Set();
         setCollectedUnitsThisStage(0);
         collectedUnitsThisStageRef.current = 0;
-        setDroppedUnitsThisStage(0);
-        droppedUnitsThisStageRef.current = 0;
         setShowStageTransition(false);
-      }, 2000);
+      }, 1000);
       
       return () => clearTimeout(timer);
     }
-  }, [gameStarted, collectedUnitsThisStage, droppedUnitsThisStage, targets.length, stage, score, triggerGameOver]);
+  }, [
+    gameStarted,
+    collectedUnitsThisStage,
+    spawnedTargetsThisStage,
+    targets.length,
+    stage,
+    score,
+    hasMissingRequiredCourses,
+    triggerGameOver,
+  ]);
 
   // ターゲット生成
   useEffect(() => {
@@ -203,27 +313,22 @@ export default function Game() {
     const intervalMs = currentStage.spawnIntervalMs;
 
     const interval = setInterval(() => {
-      // その学年で「落ちてきた総数」（取得 + 取り逃し + 画面上）を上限で制限
-      const totalThisStageBase =
-        collectedUnitsThisStageRef.current +
-        droppedUnitsThisStageRef.current +
-        activeTargetsCountRef.current;
-      if (totalThisStageBase >= CREDITS_PER_STAGE) return;
+      // 取得上限に達したら生成を止める
+      const spawnedCredits = spawnedTargetsThisStageRef.current;
+      if (spawnedCredits >= MAX_COLLECTED_PER_STAGE) return;
 
-      // 生成は setTargets の updater 内で原子的にガードして、絶対に同時に2つにならないようにする
+      // 生成は setTargets の updater 内で原子的にガードして、同時出現数を制御する
       setTargets(prev => {
-        // すでに1つ落下中なら生成しない（1個ずつ落ちるようにする）
-        if (prev.length > 0) return prev;
+        // 画面上の上限数に達していたら生成しない
+        if (prev.length >= MAX_ACTIVE_TARGETS) return prev;
 
         // updater 内でも上限制限を再チェック（競合やタイミングずれ対策）
-        const totalInUpdater =
-          collectedUnitsThisStageRef.current +
-          droppedUnitsThisStageRef.current +
-          prev.length;
-        if (totalInUpdater >= CREDITS_PER_STAGE) return prev;
+        const spawnedCreditsInside = spawnedTargetsThisStageRef.current;
+        if (spawnedCreditsInside >= MAX_COLLECTED_PER_STAGE)
+          return prev;
 
         // まだ取得しておらず、かつ今のステージでまだ出現させていない特別科目の候補
-        const availableSpecialCourses = SPECIAL_COURSES.filter(
+        const availableSpecialCourses = getSpecialCoursesForStage(stage).filter(
           c =>
             !obtainedCoursesRef.current.has(c.id) &&
             !spawnedCoursesThisStageRef.current.has(c.id),
@@ -231,13 +336,12 @@ export default function Game() {
 
         let newTarget: Target;
 
-        // 特別科目が候補にあり、一定確率で特別科目を落とす
-        if (availableSpecialCourses.length > 0 && Math.random() < 0.3) {
+        // 学年の最初は特別授業を優先して落とす（残りが0になったら通常単位）
+        if (availableSpecialCourses.length > 0) {
           const course =
             availableSpecialCourses[
               Math.floor(Math.random() * availableSpecialCourses.length)
             ];
-          spawnedCoursesThisStageRef.current.add(course.id);
 
           newTarget = {
             id: targetIdRef.current++,
@@ -247,6 +351,9 @@ export default function Game() {
             label: course.label,
             courseId: course.id,
           };
+        } else if (stage === 1) {
+          // 1年生は特別授業のみ（通常単位は落ちてこない）
+          return prev;
         } else {
           // 通常の単位（無制限に出現）
           newTarget = {
@@ -264,7 +371,7 @@ export default function Game() {
     }, intervalMs);
 
     return () => clearInterval(interval);
-  }, [gameStarted, currentStage.spawnIntervalMs]);
+  }, [gameStarted, currentStage.spawnIntervalMs, stage]);
 
   // ターゲットを下方向に落としつつ、プレイヤーとの衝突判定を行う
   useEffect(() => {
@@ -277,7 +384,10 @@ export default function Game() {
       setTargets(prevTargets => {
         const remaining: Target[] = [];
         let hitCount = 0;
-        let droppedCount = 0;
+        let remainingCapacity = Math.max(
+          0,
+          MAX_COLLECTED_PER_STAGE - collectedUnitsThisStageRef.current,
+        );
         const obtainedCourseIds: SpecialCourseId[] = [];
 
         prevTargets.forEach(target => {
@@ -292,19 +402,21 @@ export default function Game() {
           if (distance < hitRadius) {
             // まだスコア加算していないターゲットだけ加算
             if (!scoredTargetIdsRef.current.has(moved.id)) {
-              scoredTargetIdsRef.current.add(moved.id);
-              hitCount += 1;
-              // 特別科目を取得したら、それ以降はどの学年にも落ちてこないようにする
-              if (moved.kind === 'course' && moved.courseId) {
-                obtainedCourseIds.push(moved.courseId);
+              if (remainingCapacity >= CREDITS_PER_TARGET) {
+                scoredTargetIdsRef.current.add(moved.id);
+                hitCount += 1;
+                remainingCapacity -= CREDITS_PER_TARGET;
+                // 特別科目を取得したら、それ以降はどの学年にも落ちてこないようにする
+                if (moved.kind === 'course' && moved.courseId) {
+                  obtainedCourseIds.push(moved.courseId);
+                }
               }
             }
             return; // このターゲットは削除
           }
 
-          // 画面下（100%）まで到達したターゲットは削除（落下としてカウント）
+          // 画面下（100%）まで到達したターゲットは削除
           if (moved.y > 100) {
-            droppedCount += 1;
             return;
           }
 
@@ -313,16 +425,19 @@ export default function Game() {
 
         // 1フレーム内で複数同時に取得/落下しても、必ず個数分まとめて加算する
         if (hitCount > 0) {
-          setScore(s => s + hitCount * 4); // 1つの単位・授業ごとに4点
-          setCollectedUnitsThisStage(c => c + hitCount);
+          setScore(s => s + hitCount * CREDITS_PER_TARGET); // 1つの単位・授業ごとに4点
+          setCollectedUnitsThisStage(
+            c => c + hitCount * CREDITS_PER_TARGET,
+          );
         }
 
         if (obtainedCourseIds.length > 0) {
           obtainedCourseIds.forEach(id => obtainedCoursesRef.current.add(id));
-        }
-
-        if (droppedCount > 0) {
-          setDroppedUnitsThisStage(d => d + droppedCount);
+          setObtainedCourseIds(prev => {
+            const next = new Set(prev);
+            obtainedCourseIds.forEach(id => next.add(id));
+            return Array.from(next);
+          });
         }
 
         // 次フレーム用にrefも即時更新
@@ -338,21 +453,23 @@ export default function Game() {
     setGameStarted(true);
     setScore(0);
     setCollectedUnitsThisStage(0);
-    setDroppedUnitsThisStage(0);
     setStage(1);
     setShowStageTransition(false);
     setGameOver(false);
+    setGameOverReason(null);
     setIsGraduated(false);
+    setObtainedCourseIds([]);
     setPlayerPosition(updatePlayerPosition({ x: 50, y: 80 }));
     setTargets([]);
     activeTargetsCountRef.current = 0;
     setSpawnedTargetsThisStage(0);
+    spawnedTargetsThisStageRef.current = 0;
+    countedSpawnTargetIdsRef.current = new Set();
     targetIdRef.current = 0;
     scoredTargetIdsRef.current = new Set();
     obtainedCoursesRef.current = new Set();
     spawnedCoursesThisStageRef.current = new Set();
     collectedUnitsThisStageRef.current = 0;
-    droppedUnitsThisStageRef.current = 0;
   };
 
   const stopGame = () => {
@@ -366,8 +483,55 @@ export default function Game() {
     <div className="flex flex-col items-center gap-8 p-4 md:p-8 w-full max-w-3xl md:max-w-5xl lg:max-w-6xl xl:max-w-[1400px] 2xl:max-w-[1600px]">
       <BluetoothController onDataReceived={handleDataReceived} />
       
-      <div className="w-full">
-        <div className="mb-4 text-center space-y-3">
+      <div className="w-full flex flex-col lg:flex-row gap-6">
+        <aside className="w-full lg:w-72 shrink-0 bg-white/80 dark:bg-gray-800/80 rounded-2xl border border-gray-200 dark:border-gray-700 shadow-lg p-4">
+          <h3 className="text-lg font-bold text-gray-900 dark:text-gray-100 mb-3">
+            特別授業チェック
+          </h3>
+          <div className="space-y-4">
+            <div>
+              <p className="text-sm font-semibold text-green-700 dark:text-green-300 mb-2">
+                取得済み ({obtainedCourses.length})
+              </p>
+              {obtainedCourses.length === 0 ? (
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  まだ取得できていません
+                </p>
+              ) : (
+                <ul className="space-y-1 text-xs text-gray-800 dark:text-gray-200">
+                  {obtainedCourses.map(course => (
+                    <li key={course.id} className="flex items-center gap-2">
+                      <span className="inline-flex h-2 w-2 rounded-full bg-green-500" />
+                      <span>{course.label}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-red-700 dark:text-red-300 mb-2">
+                未取得 ({missingCourses.length})
+              </p>
+              {missingCourses.length === 0 ? (
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  すべて取得済みです
+                </p>
+              ) : (
+                <ul className="space-y-1 text-xs text-gray-700 dark:text-gray-300">
+                  {missingCourses.map(course => (
+                    <li key={course.id} className="flex items-center gap-2">
+                      <span className="inline-flex h-2 w-2 rounded-full bg-red-400" />
+                      <span>{course.label}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        </aside>
+
+        <div className="flex-1">
+          <div className="mb-4 text-center space-y-3">
           <div className="flex flex-col items-center gap-1">
             <h2 className="text-3xl font-bold text-gray-900 dark:text-gray-100">
               スコア: {score}
@@ -395,20 +559,17 @@ export default function Game() {
                 現在の学年: {getGradeName(stage)}
               </span>
               <span className="text-xs text-gray-600 dark:text-gray-400">
-                この学年で落ちてきた単位・特別授業（累計）: {spawnedTargetsThisStage} / {CREDITS_PER_STAGE}
+                この学年で出現した単位（累計）: {spawnedTargetsThisStage}
               </span>
               <span className="text-xs text-gray-600 dark:text-gray-400">
                 いま画面上に落ちている単位・特別授業: {targets.length}
               </span>
               <span className="text-xs text-gray-600 dark:text-gray-400">
-                この学年で取得した単位・特別授業: {collectedUnitsThisStage}
-              </span>
-              <span className="text-xs text-gray-600 dark:text-gray-400">
-                この学年で取り逃した単位・特別授業: {droppedUnitsThisStage}
+                この学年で取得した単位: {collectedUnitsThisStage} / {MAX_COLLECTED_PER_STAGE}
               </span>
               {stage < STAGE_CONFIG.length ? (
                 <span>
-                  {CREDITS_PER_STAGE}個の単位・授業が落ちたら次の学年へ進みます
+                  {MAX_COLLECTED_PER_STAGE}単位分が出現すると次の学年へ進みます
                 </span>
               ) : (
                 <span>最終学年です</span>
@@ -434,10 +595,10 @@ export default function Game() {
             )}
 
           </div>
-        </div>
-        
-        {/* ゲーム画面 */}
-        <div className="relative w-full h-[34rem] md:h-[42rem] lg:h-[46rem] bg-gradient-to-br from-blue-100 to-purple-100 dark:from-gray-800 dark:to-gray-900 rounded-2xl overflow-hidden border-2 border-gray-300 dark:border-gray-700 shadow-2xl">
+          </div>
+          
+          {/* ゲーム画面 */}
+          <div className="relative w-full h-[34rem] md:h-[42rem] lg:h-[46rem] bg-gradient-to-br from-blue-100 to-purple-100 dark:from-gray-800 dark:to-gray-900 rounded-2xl overflow-hidden border-2 border-gray-300 dark:border-gray-700 shadow-2xl">
           {/* プレイヤー */}
           <div
             className="absolute w-8 h-8 bg-blue-500 rounded-full transition-all duration-100 shadow-lg border-2 border-white"
@@ -485,9 +646,10 @@ export default function Game() {
                   ゲームオーバー
                 </h2>
                 <p className="text-lg md:text-2xl text-gray-200 mb-4">
-                  {stage === 4
-                    ? 'スコアが124に届きませんでした。'
-                    : '大学4年生になるまでにスコア90に届きませんでした。'}
+                  {gameOverReason ??
+                    (stage === 4
+                      ? 'スコアが124に届きませんでした。'
+                      : '大学4年生になるまでにスコア90に届きませんでした。')}
                 </p>
                 <p className="text-sm md:text-base text-gray-300 mb-6">
                   もう一度チャレンジして、単位をしっかり集めよう！
@@ -537,19 +699,9 @@ export default function Game() {
                 {controllerData ? (
                   <>
                     <h3 className="text-2xl font-bold mb-4 text-green-400">✓ 操作確認モード</h3>
-                    <p className="mb-4 text-sm">M5StickCplus2が接続されました。以下の操作を試してください：</p>
-                    <ul className="text-left space-y-2 text-sm mb-4">
-                      <li className={controllerData.buttonA ? 'text-green-400 font-bold' : ''}>
-                        • ボタンAを押す → {controllerData.buttonA ? '✓ 検出中' : '未検出'}
-                      </li>
-                      <li className={controllerData.buttonB ? 'text-green-400 font-bold' : ''}>
-                        • ボタンBを押す → {controllerData.buttonB ? '✓ 検出中' : '未検出'}
-                      </li>
-                      <li className={Math.abs(controllerData.accelX) > 0.1 || Math.abs(controllerData.accelY) > 0.1 ? 'text-green-400 font-bold' : ''}>
-                        • デバイスを傾ける → {Math.abs(controllerData.accelX) > 0.1 || Math.abs(controllerData.accelY) > 0.1 ? '✓ 検出中（青い点が動きます）' : '未検出'}
-                      </li>
-                    </ul>
-                    <p className="text-xs text-gray-400 mt-4">操作が確認できたら「ゲーム開始」ボタンを押してください</p>
+                    <p className="mb-4 text-sm">M5StickCplus2が接続されました。</p>
+
+                    <p className="text-xs text-gray-400 mt-4">「ゲーム開始」ボタンを押してください</p>
                   </>
                 ) : (
                   <>
@@ -566,6 +718,7 @@ export default function Game() {
               </div>
             </div>
           )}
+          </div>
         </div>
       </div>
     </div>
